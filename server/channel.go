@@ -120,8 +120,10 @@ func (h *ChannelHandler) doReadClient(ctx context.Context) bool {
 	batch, err := h.transport.Read(ctx, h.channelID, shared.ClientBatchFile)
 	if err != nil {
 		if errors.Is(err, shared.ErrNotFound) {
-			slog.Info("channel deleted, stopping handler", "channel_id", h.channelID)
-			return false
+			// The channel may exist while the client batch file is not yet visible.
+			// Keep the handler alive; listener reconciliation stops truly deleted channels.
+			slog.Debug("client batch not found yet", "channel_id", h.channelID)
+			return true
 		}
 		slog.Debug("read client batch failed", "channel_id", h.channelID, "error", err)
 		return true

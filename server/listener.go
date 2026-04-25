@@ -51,16 +51,36 @@ func (l *ChannelListener) Run(ctx context.Context) error {
 }
 
 func (l *ChannelListener) scan(ctx context.Context) {
+	active := make(map[string]struct{})
+	hadListError := false
+
 	for tokenIdx, transport := range l.transports {
 		channels, err := transport.ListChannels(ctx)
 		if err != nil {
 			slog.Warn("list channels failed", "token_index", tokenIdx, "error", err)
+			hadListError = true
 			continue
 		}
 		for _, ch := range channels {
+			active[ch.ID] = struct{}{}
 			l.startHandler(ctx, tokenIdx, ch.ID, transport)
 		}
 	}
+
+	if hadListError {
+		return
+	}
+
+	l.mu.Lock()
+	for channelID, cancel := range l.handlers {
+		if _, ok := active[channelID]; ok {
+			continue
+		}
+		cancel()
+		delete(l.handlers, channelID)
+		slog.Info("channel deleted, stopping handler", "channel_id", channelID)
+	}
+	l.mu.Unlock()
 }
 
 func (l *ChannelListener) startHandler(parent context.Context, tokenIdx int, channelID string, transport shared.Transport) {
