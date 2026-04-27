@@ -1,13 +1,27 @@
 github:
   tokens:
+    # Per-token batch_interval / fetch_interval are optional overrides.
+    # If omitted they fall back to github.batch_interval / github.fetch_interval.
     - token: "ghp_your_token_here"
       transport: "gist"
+      # gist transport: 500/hr write quota → keep these conservative.
+      batch_interval: 500ms
+      fetch_interval: 500ms
+
     - token: "ghp_your_other_token_here"
       transport: "git"
       repo: "yourname/your-private-tunnel-repo"
-  upstream_connections: 2
-  batch_interval: 1000ms
-  fetch_interval: 1000ms
+      # git transport: no REST quota, push-based — run fast.
+      batch_interval: 100ms
+      fetch_interval: 200ms
+
+  # One channel per token is enough; many virtual connections multiplex
+  # over a single channel via the mux protocol.
+  upstream_connections: 1
+
+  # Global defaults — used by tokens that don't set their own intervals.
+  batch_interval: 100ms
+  fetch_interval: 200ms
   api_timeout: 10s
 
 socks:

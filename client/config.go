@@ -18,10 +18,40 @@ var Version = "dev"
 // TokenConfig holds per-token GitHub configuration.
 // Transport defaults to "git" when empty.
 // Repo is required when Transport is "git".
+//
+// BatchInterval and FetchInterval can override the global github.batch_interval
+// and github.fetch_interval for this token only — useful when mixing a fast
+// `git` transport with a rate-limited `gist` transport in the same config.
 type TokenConfig struct {
-	Token     string `yaml:"token"`
-	Transport string `yaml:"transport"`
-	Repo      string `yaml:"repo"`
+	Token         string        `yaml:"token"`
+	Transport     string        `yaml:"transport"`
+	Repo          string        `yaml:"repo"`
+	BatchInterval time.Duration `yaml:"batch_interval,omitempty"`
+	FetchInterval time.Duration `yaml:"fetch_interval,omitempty"`
+}
+
+// EffectiveBatchInterval returns the per-token batch interval if set, else fallback.
+func (tc TokenConfig) EffectiveBatchInterval(fallback time.Duration) time.Duration {
+	if tc.BatchInterval > 0 {
+		return tc.BatchInterval
+	}
+	return fallback
+}
+
+// EffectiveFetchInterval returns the per-token fetch interval if set, else fallback.
+func (tc TokenConfig) EffectiveFetchInterval(fallback time.Duration) time.Duration {
+	if tc.FetchInterval > 0 {
+		return tc.FetchInterval
+	}
+	return fallback
+}
+
+// EffectiveTransport returns the configured transport, defaulting to "git".
+func (tc TokenConfig) EffectiveTransport() string {
+	if tc.Transport == "" {
+		return "git"
+	}
+	return tc.Transport
 }
 
 // Config holds all client configuration, loaded from YAML file and/or CLI flags.

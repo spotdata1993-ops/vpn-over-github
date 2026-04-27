@@ -38,11 +38,20 @@ type writeEntry struct {
 // Background syncer fetches every syncInterval.
 // Write calls are batched into a single push within a writeBatchWindow.
 // Read and ListChannels are local filesystem reads — zero network overhead.
+//
+// Locking:
+//   - mu protects the worktree (read concurrent, write exclusive). Network
+//     fetches do NOT hold mu so concurrent Read calls are not blocked while
+//     a fetch is in flight (a fetch can take 100ms–several seconds on a
+//     congested link).
+//   - fetchMu serializes concurrent fetches between the syncer and writer
+//     to avoid two simultaneous git fetches against the same repo.
 type GitSmartHTTPClient struct {
 	auth       *githttp.BasicAuth
 	repoURL    string
 	mainBranch string
 	mu         sync.RWMutex
+	fetchMu    sync.Mutex
 	repo       *gogit.Repository
 	workDir    string
 	writeCh    chan *writeRequest
@@ -308,12 +317,44 @@ func (c *GitSmartHTTPClient) runSyncer(ctx context.Context) {
 			return
 		case <-time.After(syncInterval):
 		}
-		c.mu.Lock()
-		if err := c.syncToRemote(ctx); err != nil {
+		// Network fetch happens OUTSIDE c.mu so concurrent Read calls on the
+		// worktree are not blocked while a fetch is in flight. The reset is
+		// quick and runs under c.mu briefly.
+		if err := c.fetchAndApply(ctx); err != nil {
 			slog.Debug("git transport: background sync failed", "error", err)
 		}
-		c.mu.Unlock()
 	}
+}
+
+// fetchAndApply fetches from origin, then briefly takes c.mu to apply the
+// fetched HEAD to the worktree. This is what runSyncer calls every tick.
+func (c *GitSmartHTTPClient) fetchAndApply(ctx context.Context) error {
+	c.fetchMu.Lock()
+	fetchErr := c.repo.FetchContext(ctx, &gogit.FetchOptions{
+		RemoteName: "origin",
+		Auth:       c.auth,
+	})
+	c.fetchMu.Unlock()
+	if fetchErr != nil && fetchErr != gogit.NoErrAlreadyUpToDate {
+		return fmt.Errorf("git fetch: %w", fetchErr)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.applyFetchedHead()
+}
+
+// applyFetchedHead resets the worktree to the remote HEAD. Caller must hold c.mu.
+func (c *GitSmartHTTPClient) applyFetchedHead() error {
+	remoteRef := plumbing.NewRemoteReferenceName("origin", c.mainBranch)
+	ref, err := c.repo.Reference(remoteRef, true)
+	if err != nil {
+		return fmt.Errorf("git resolve remote HEAD (%s): %w", remoteRef, err)
+	}
+	w, err := c.repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("git worktree: %w", err)
+	}
+	return w.Reset(&gogit.ResetOptions{Commit: ref.Hash(), Mode: gogit.HardReset})
 }
 
 func (c *GitSmartHTTPClient) runBatchWriter(ctx context.Context) {
@@ -406,24 +447,22 @@ func (c *GitSmartHTTPClient) runBatchWriter(ctx context.Context) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+// syncToRemote is called by writers (EnsureChannel, DeleteChannel, runBatchWriter)
+// while holding c.mu — the fetch is serialized via fetchMu so it doesn't
+// race the syncer's fetch.
+//
+// Caller must hold c.mu (write lock).
 func (c *GitSmartHTTPClient) syncToRemote(ctx context.Context) error {
+	c.fetchMu.Lock()
 	fetchErr := c.repo.FetchContext(ctx, &gogit.FetchOptions{
 		RemoteName: "origin",
 		Auth:       c.auth,
 	})
+	c.fetchMu.Unlock()
 	if fetchErr != nil && fetchErr != gogit.NoErrAlreadyUpToDate {
 		return fmt.Errorf("git fetch: %w", fetchErr)
 	}
-	remoteRef := plumbing.NewRemoteReferenceName("origin", c.mainBranch)
-	ref, err := c.repo.Reference(remoteRef, true)
-	if err != nil {
-		return fmt.Errorf("git resolve remote HEAD (%s): %w", remoteRef, err)
-	}
-	w, err := c.repo.Worktree()
-	if err != nil {
-		return fmt.Errorf("git worktree: %w", err)
-	}
-	return w.Reset(&gogit.ResetOptions{Commit: ref.Hash(), Mode: gogit.HardReset})
+	return c.applyFetchedHead()
 }
 
 func (c *GitSmartHTTPClient) writeFileBytes(relPath string, content []byte) error {

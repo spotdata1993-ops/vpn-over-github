@@ -2,12 +2,18 @@ github:
   tokens:
     - token: "ghp_your_server_token_here"
       transport: "gist"
+      batch_interval: 500ms
+      fetch_interval: 500ms
+
     - token: "ghp_your_other_server_token_here"
       transport: "git"
       repo: "yourname/your-private-tunnel-repo"
-  upstream_connections: 2
-  batch_interval: 1000ms
-  fetch_interval: 1000ms
+      batch_interval: 100ms
+      fetch_interval: 200ms
+
+  upstream_connections: 1
+  batch_interval: 100ms
+  fetch_interval: 200ms
   api_timeout: 10s
 
 cleanup:

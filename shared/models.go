@@ -34,8 +34,18 @@ type Frame struct {
 }
 
 // Batch is the top-level object written to a channel file.
-// Readers use Seq to detect new batches (skip if Seq ≤ last seen).
+//
+// Each writer side picks a random Epoch at startup and increments Seq
+// monotonically within that epoch. A reader treats a batch as new if
+// either:
+//   - its Epoch differs from the last accepted Epoch (writer restart), or
+//   - its Epoch matches and Seq > last accepted Seq.
+//
+// This is robust to writer restarts that reset Seq back to 1 — the old
+// `(seq, ts)` heuristic accepted such resets only opportunistically and
+// could either drop or duplicate frames.
 type Batch struct {
+	Epoch  int64   `json:"epoch,omitempty"`
 	Seq    int64   `json:"seq"`
 	Ts     int64   `json:"ts"`
 	Frames []Frame `json:"frames"`

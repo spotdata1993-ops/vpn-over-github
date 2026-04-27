@@ -9,13 +9,14 @@
 
 ## Does it actually work?
 
-**Sort of, but it's slow and has real limits.**
+**Yes, but it's slow and has real limits.**
 
-- Every packet is a round-trip to `api.github.com` or `github.com` → **100–500 ms latency per request**.
+- Every batch of frames is one round-trip to `api.github.com` or `github.com` → **100–500 ms latency per batch**.
+- All virtual connections multiplex through one batch per channel — so a single `git push` carries data for many in-flight TCP streams (handshake, reads, writes) at once instead of one HTTP request per packet.
 - **`gist` transport**: bound by GitHub's **secondary rate limit of ~500 content-generating writes/hr per account**.
 - **`git` transport** (recommended for high traffic): push/pull over git Smart HTTP uses a **completely separate rate-limit pool** with no hard published per-hour write ceiling. Far more headroom.
 - New GitHub accounts have much lower REST limits (~100 req/hr). The `git` transport is unaffected.
-- Interactive sessions (SSH, light browsing) work on either transport. Video or large downloads will exhaust the `gist` transport quota fast.
+- Interactive sessions (SSH, light browsing, telegram) work fine on the `git` transport. Video or large downloads will exhaust the `gist` transport quota fast.
 
 ---
 
@@ -34,6 +35,41 @@ The `git` transport talks to `github.com` (git Smart HTTP) — a different rate-
 ```
 App → SOCKS5 (client) → GitHub (gist or git) → gh-tunnel-server → Internet
 ```
+
+### Mux protocol (how it stays usable with many connections)
+
+Each upstream channel is a single Gist or a single directory in a private repo
+holding two JSON files: `client.json` (client → server) and `server.json`
+(server → client). Each side periodically writes a `Batch` containing every
+queued frame for every active virtual connection it owns:
+
+```jsonc
+// client.json — one batch carries OPEN+data for many conns at once
+{
+  "epoch": 8421337421,
+  "seq": 47,
+  "ts": 1714080123,
+  "frames": [
+    { "id": "c1f3…", "seq": 1, "dst": "telegram-cdn:443", "data": "<b64>", "status": "active" },
+    { "id": "c1f3…", "seq": 2,                            "data": "<b64>", "status": "active" },
+    { "id": "ab09…", "seq": 1, "dst": "api.ipify.org:443",                 "status": "active" }
+  ]
+}
+```
+
+Notes:
+- `epoch` is randomized per-side per-run; readers reset their dedup state when
+  they see a new epoch (handles writer restarts cleanly).
+- `seq` is monotonic within an epoch; readers ignore batches with `seq` ≤ the
+  last accepted `seq`.
+- The first frame of a new conn carries `dst`; it can also carry data, so an
+  interactive client (e.g. HTTPS `ClientHello`) ships its OPEN and first
+  payload bytes in one round-trip.
+- `status: closing` from the client tears down the destination on the server
+  and triggers a `closed` ack frame in the next server batch.
+- The server dials destinations **asynchronously** and buffers any concurrent
+  data frames until the dial completes — so a slow target never serializes
+  the rest of the batch (this is what unblocked telegram-style workloads).
 
 ### Rate limit facts
 
@@ -90,7 +126,7 @@ make build-server
 
 ### Configuration (per-token, required)
 
-Copy `example_client_config.yaml` or `example_server_config.yaml` and edit. The config **must** be an array of token objects, each specifying its own `token`, and optionally `transport` and `repo` fields:
+Copy `example_client_config.yaml` or `example_server_config.yaml` and edit. The config **must** be an array of token objects, each specifying its own `token`, and optionally `transport`, `repo`, `batch_interval` and `fetch_interval` fields:
 
 ```yaml
 github:
@@ -122,6 +158,24 @@ github:
 - Each token object must have a `token` field.
 - `transport` and `repo` are per-token. If omitted, `transport` defaults to `git`. `repo` is required for `git` transport.
 - Only tokens from **different GitHub accounts** multiply your write capacity. Tokens from the same account share one rate-limit pool.
+- `batch_interval` and `fetch_interval` are per-token overrides. Use them when mixing transports — keep `gist` slow (≥500ms) to respect the 500/hr write cap, run `git` fast (100ms / 200ms) for interactive workloads:
+
+```yaml
+github:
+  tokens:
+    - token: "ghp_gist_token"
+      transport: "gist"
+      batch_interval: 500ms
+      fetch_interval: 500ms
+    - token: "ghp_git_token"
+      transport: "git"
+      repo: "yourname/tunnel-data"
+      batch_interval: 100ms
+      fetch_interval: 200ms
+  # Global fallbacks for tokens that don't override
+  batch_interval: 100ms
+  fetch_interval: 200ms
+```
 
 #### Example: Gist transport
 
@@ -163,14 +217,16 @@ github:
 
 | Key | Default | Notes |
 |---|---|---|
-| `github.tokens` | — | **REQUIRED**. Array of objects, each with `token` (and optionally `transport`, `repo`). |
-| `github.upstream_connections` | `2` | Number of pre-allocated upstream channels per token. |
-| `github.batch_interval` | `100ms` | Client/server batch flush interval for multiplexed frames. |
-| `github.fetch_interval` | `200ms` | Poll interval for receiving batches from the opposite side. |
+| `github.tokens` | — | **REQUIRED**. Array of objects, each with `token` (and optionally `transport`, `repo`, `batch_interval`, `fetch_interval`). |
+| `github.upstream_connections` | `2` | Number of pre-allocated upstream channels per token. `1` is plenty thanks to the mux protocol. |
+| `github.batch_interval` | `100ms` | Default batch flush interval (per-token override available). |
+| `github.fetch_interval` | `200ms` | Default poll interval for receiving batches (per-token override available). |
 | `github.api_timeout` | `10s` | HTTP timeout for REST API operations. |
 | `socks.listen_addr` | `127.0.0.1:1080` | Client SOCKS5 address |
 | `encryption.algorithm` | `xor` | `xor` (fast, insecure) or `aes` (AES-256-GCM) |
 | `cleanup.enabled` | `false` | Enable server cleanup daemon (costs rate-limit quota for `gist` transport) |
+
+**On the mux**: the client emits a flush as soon as new data is queued (Connect / Write / Close all signal the writer), bounded by `batch_interval / 4` for coalescing. So an idle channel still wakes only on the periodic ticker, but an interactive open-write doesn't have to wait a full `batch_interval` before going on the wire.
 
 ### Client flags
 

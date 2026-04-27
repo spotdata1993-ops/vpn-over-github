@@ -10,9 +10,35 @@ import (
 )
 
 type TokenConfig struct {
-	Token     string `yaml:"token"`
-	Transport string `yaml:"transport"`
-	Repo      string `yaml:"repo"`
+	Token         string        `yaml:"token"`
+	Transport     string        `yaml:"transport"`
+	Repo          string        `yaml:"repo"`
+	BatchInterval time.Duration `yaml:"batch_interval,omitempty"`
+	FetchInterval time.Duration `yaml:"fetch_interval,omitempty"`
+}
+
+// EffectiveBatchInterval returns the per-token batch interval if set, else fallback.
+func (tc TokenConfig) EffectiveBatchInterval(fallback time.Duration) time.Duration {
+	if tc.BatchInterval > 0 {
+		return tc.BatchInterval
+	}
+	return fallback
+}
+
+// EffectiveFetchInterval returns the per-token fetch interval if set, else fallback.
+func (tc TokenConfig) EffectiveFetchInterval(fallback time.Duration) time.Duration {
+	if tc.FetchInterval > 0 {
+		return tc.FetchInterval
+	}
+	return fallback
+}
+
+// EffectiveTransport returns the configured transport, defaulting to "git".
+func (tc TokenConfig) EffectiveTransport() string {
+	if tc.Transport == "" {
+		return "git"
+	}
+	return tc.Transport
 }
 
 // ServerConfig holds all server configuration.
